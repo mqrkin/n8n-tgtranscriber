@@ -5,6 +5,7 @@ services:
     container_name: tg-bot-api
     restart: unless-stopped
     networks: [app-net]
+    user: "0:0"
     ports:
       - "127.0.0.1:8081:8081"
     env_file:
@@ -21,7 +22,7 @@ services:
       --http-port=8081
       --local
     volumes:
-      - /opt/tg-bot-api:/var/lib/telegram-bot-api
+      - tg_bot_api_data:/var/lib/telegram-bot-api
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/bot$TELEGRAM_BOT_TOKEN/getMe | grep -q '\"ok\":true'"]
       interval: 15s
@@ -120,12 +121,14 @@ services:
     volumes:
       - n8n_data:/home/node/.n8n
       - /tmp:/tmp
-      - /opt/tg-bot-api:/opt/tg-bot-api
+      - tg_bot_api_data:/opt/tg-bot-api:ro
 
 volumes:
   postgres_data:
     driver: local
   n8n_data:
+    driver: local
+  tg_bot_api_data:
     driver: local
 
 networks:
