@@ -1,0 +1,511 @@
+{
+  "name": "Telegram Audio Transcription Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "puzzlebot",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-puzzlebot",
+      "name": "Webhook Puzzlebot",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.TELEGRAM_API_URL }}/bot{{ $env.TELEGRAM_BOT_TOKEN }}/getFile",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "file_id",
+              "value": "={{ $json.body.file_id }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "telegram-get-fileid",
+      "name": "Telegram Get FileID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const filePath = $input.item.json.result.file_path;\nconst userId = $input.item.json.body.user_id || 'unknown';\nconst fileId = $input.item.json.body.file_id;\n\n// Strip system prefix from file_path\nconst cleanPath = filePath.replace(/^\\/var\\/lib\\/telegram-bot-api\\//, '');\n\n// Build absolute path to cached file\nconst absPath = `/opt/tg-bot-api/${cleanPath}`;\n\n// Generate unique temp file names\nconst timestamp = Date.now();\nconst inPath = `/tmp/audio_in_${userId}_${timestamp}`;\nconst outPath = `/tmp/audio_out_${userId}_${timestamp}.mp3`;\n\n// Build object key for S3 upload (namespaced by user_id)\nconst objectKey = `transcriptions/${userId}/${timestamp}.mp3`;\n\nreturn {\n  absPath,\n  inPath,\n  outPath,\n  objectKey,\n  userId,\n  fileId,\n  originalPath: filePath\n};"
+      },
+      "id": "code-build-paths",
+      "name": "Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=ffmpeg -i {{ $json.absPath }} -vn -ar 16000 -ac 1 -b:a 64k -f mp3 {{ $json.outPath }}",
+        "options": {}
+      },
+      "id": "ffmpeg-extract",
+      "name": "ffmpeg",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "filePath": "={{ $json.outPath }}",
+        "options": {
+          "encoding": "utf8"
+        }
+      },
+      "id": "read-mp3",
+      "name": "Read/Write Files from Disk1",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "merge-file-metadata",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        1320,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "={{ $env.DO_SPACES_BUCKET }}",
+        "fileName": "={{ $json.objectKey }}",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "additionalFields": {
+          "acl": "public-read"
+        },
+        "options": {
+          "endpoint": "={{ $env.DO_SPACES_ENDPOINT }}",
+          "region": "={{ $env.DO_SPACES_REGION }}"
+        }
+      },
+      "id": "spaces-upload",
+      "name": "Spaces (S3) Upload",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        380
+      ],
+      "credentials": {
+        "aws": {
+          "id": "1",
+          "name": "DigitalOcean Spaces"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "merge-upload-info",
+      "name": "Merge1",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const bucket = $env.DO_SPACES_BUCKET;\nconst endpoint = $env.DO_SPACES_ENDPOINT;\nconst cdnDomain = $env.DO_CDN_DOMAIN;\nconst key = $input.item.json.objectKey;\n\nlet audioUrl;\n\nif (cdnDomain) {\n  // Use CDN domain if configured\n  audioUrl = `https://${cdnDomain}/${key}`;\n} else {\n  // Use direct Spaces URL\n  audioUrl = `https://${bucket}.${endpoint}/${key}`;\n}\n\nreturn {\n  audio_url: audioUrl,\n  userId: $input.item.json.userId,\n  objectKey: key\n};"
+      },
+      "id": "build-url",
+      "name": "Build DO URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.replicate.com/v1/predictions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "version",
+              "value": "={{ $json.stt_model_version || 'b9fd8a4dcae7b1f199b32d9c8953b2e187a1cf8e23ee04707b3f8c743b8a2e78' }}"
+            },
+            {
+              "name": "input",
+              "value": "={{ { \"audio\": $json.audio_url, \"user_id\": $json.userId } }}"
+            },
+            {
+              "name": "webhook",
+              "value": "={{ $env.N8N_EDITOR_BASE_URL }}/webhook/replicate-webh111"
+            },
+            {
+              "name": "webhook_events_filter",
+              "value": "=[\"completed\"]"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "to-replicate",
+      "name": "To Replicate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        460
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2",
+          "name": "Replicate API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "replicate-webh111",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-replicate",
+      "name": "Replicate-webh",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        2420,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.replicate.com/v1/predictions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "version",
+              "value": "={{ $json.gpt_model_version || '1d5158abf5f1c491e8c6c0a62e6c2e0c9da8a1a4a4b8f8c9c0a1e3c8c9e1c1a1' }}"
+            },
+            {
+              "name": "input",
+              "value": "={{ {\n  \"system_prompt\": \"You are a transcription editor. Your task: 1) Keep the original language. 2) Fix punctuation, grammar, and structure. 3) Remove filler words (um, uh, like). 4) Output ONLY the cleaned text in a single block. No explanations, no formatting markers.\",\n  \"prompt\": $json.body.output.transcription || $json.body.output.text || $json.body.output,\n  \"max_tokens\": 4000,\n  \"temperature\": 0.3\n} }}"
+            },
+            {
+              "name": "webhook",
+              "value": "={{ $env.N8N_EDITOR_BASE_URL }}/webhook/Repl-chatgpt"
+            },
+            {
+              "name": "webhook_events_filter",
+              "value": "=[\"completed\"]"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "chatgpt-formatting",
+      "name": "Chat-GPT Formatting",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        460
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2",
+          "name": "Replicate API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "Repl-chatgpt",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-chatgpt",
+      "name": "Repl-chatgpt",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        2860,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.TELEGRAM_API_URL }}/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBasicAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $json.body.input.user_id || $json.userId }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ \n  const output = $json.body.output;\n  \n  // Handle different output formats\n  if (typeof output === 'string') {\n    return output;\n  } else if (Array.isArray(output)) {\n    return output.join(' ');\n  } else if (output && output.text) {\n    return output.text;\n  } else if (output && output.chunks) {\n    return output.chunks.join(' ');\n  }\n  \n  return 'Transcription completed but format not recognized.';\n}}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "send-to-telegram",
+      "name": "Send to Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3080,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Puzzlebot": {
+      "main": [
+        [
+          {
+            "node": "Telegram Get FileID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Get FileID": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "ffmpeg",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "ffmpeg": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Spaces (S3) Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spaces (S3) Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Build DO URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build DO URL": {
+      "main": [
+        [
+          {
+            "node": "To Replicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To Replicate": {
+      "main": [
+        [
+          {
+            "node": "Replicate-webh",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Replicate-webh": {
+      "main": [
+        [
+          {
+            "node": "Chat-GPT Formatting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat-GPT Formatting": {
+      "main": [
+        [
+          {
+            "node": "Repl-chatgpt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Repl-chatgpt": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2025-11-12T00:00:00.000Z",
+  "versionId": "1"
+}

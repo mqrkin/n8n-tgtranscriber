@@ -1,0 +1,20 @@
+FROM n8nio/n8n:latest
+
+USER root
+
+# Install ffmpeg and other required tools
+RUN apk add --no-cache \
+    ffmpeg \
+    python3 \
+    py3-pip \
+    curl \
+    bash
+
+# Create necessary directories
+RUN mkdir -p /tmp /data/tg-cache && \
+    chown -R node:node /tmp /data/tg-cache
+
+USER node
+
+# Set working directory
+WORKDIR /home/node

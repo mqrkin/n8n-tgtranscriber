@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  # Локальный Telegram Bot API (не публикуем наружу)
+  tg-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: tg-bot-api
+    restart: unless-stopped
+    networks: [app-net]
+    ports:
+      - "127.0.0.1:8081:8081"
+    env_file:
+      - .env
+    environment:
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+      TELEGRAM_LOCAL: "1"
+    command: >
+      --dir=/var/lib/telegram-bot-api
+      --http-port=8081
+      --local
+    volumes:
+      - /opt/tg-bot-api:/var/lib/telegram-bot-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/bot$TELEGRAM_BOT_TOKEN/getMe | grep -q '\"ok\":true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    networks: [app-net]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-n8n}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-n8n}"
+      POSTGRES_DB: "${POSTGRES_DB:-n8n}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-n8n}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    image: n8n-ffmpeg
+    container_name: n8n
+    restart: unless-stopped
+    networks: [app-net]
+    depends_on:
+      tg-bot-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5678:5678"
+    env_file:
+      - .env
+    environment:
+      # Database Configuration
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-n8n}
+      
+      # n8n Configuration
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-changeme}
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
+      
+      # Editor URL for webhook generation
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL:-http://localhost:5678}
+      
+      # Execution settings
+      - EXECUTIONS_PROCESS=main
+      - EXECUTIONS_DATA_SAVE_ON_ERROR=all
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
+      - EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
+      
+      # Security
+      - N8N_SECURE_COOKIE=false
+      
+      # Timezone
+      - GENERIC_TIMEZONE=Europe/Moscow
+      - TZ=Europe/Moscow
+      
+      # File paths for Telegram bot cache
+      - TG_CACHE_PATH=/opt/tg-bot-api
+      
+      # Telegram Bot Configuration
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_API_URL=http://tg-bot-api:8081
+      
+      # DigitalOcean Spaces / S3 Configuration
+      - DO_SPACES_KEY=${DO_SPACES_KEY}
+      - DO_SPACES_SECRET=${DO_SPACES_SECRET}
+      - DO_SPACES_BUCKET=${DO_SPACES_BUCKET}
+      - DO_SPACES_ENDPOINT=${DO_SPACES_ENDPOINT}
+      - DO_SPACES_REGION=${DO_SPACES_REGION:-nyc3}
+      - DO_CDN_DOMAIN=${DO_CDN_DOMAIN:-}
+      
+      # Replicate API Configuration
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+      
+      # OpenAI Configuration (if needed)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - /tmp:/tmp
+      - /opt/tg-bot-api:/opt/tg-bot-api
+
+volumes:
+  postgres_data:
+    driver: local
+  n8n_data:
+    driver: local
+
+networks:
+  app-net:
+    driver: bridge
